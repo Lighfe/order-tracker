@@ -9,6 +9,10 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
+from app.telemetry import (
+    TelemetryMiddleware, configure_telemetry, logger, order_lookups, tracer,
+)
+
 
 DB_PATH = Path(os.getenv("ORDER_DB_PATH", "data/orders.db"))
 STATUSES = {"received", "preparing", "shipped", "delivered"}
@@ -55,7 +59,7 @@ def order_detail(row):
     order = as_dict(row)
     if order["priority"] == "express":
         placed_at = datetime.fromisoformat(order["created_at"])
-        estimated_at = placed_at.replace(day=placed_at.day + 2)
+        estimated_at = placed_at + timedelta(days=2)
         order["estimated_delivery"] = estimated_at.date().isoformat()
     return order
 
@@ -76,7 +80,9 @@ async def lifespan(_app: FastAPI):
     yield
 
 
+configure_telemetry()
 app = FastAPI(title="Order Tracker", lifespan=lifespan)
+app.add_middleware(TelemetryMiddleware)
 
 
 @app.get("/")
@@ -100,11 +106,39 @@ def list_orders():
 
 @app.get("/api/orders/{order_id}")
 def get_order(order_id: str):
-    with connect() as db:
-        row = db.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
-    if row is None:
-        raise HTTPException(404, "Order not found")
-    return order_detail(row)
+    with tracer.start_as_current_span(
+        "order.lookup", attributes={"order.id": order_id}
+    ) as span:
+        try:
+            with connect() as db:
+                row = db.execute(
+                    "SELECT * FROM orders WHERE id = ?", (order_id,)
+                ).fetchone()
+            if row is None:
+                span.set_attribute("order.found", False)
+                order_lookups.add(1, {"outcome": "not_found"})
+                logger.warning(
+                    "Order %s not found", order_id,
+                    extra={"order.id": order_id, "order.found": False},
+                )
+                raise HTTPException(404, "Order not found")
+            span.set_attributes({
+                "order.found": True,
+                "order.priority": row["priority"],
+                "order.status": row["status"],
+            })
+            order = order_detail(row)
+        except HTTPException:
+            raise
+        except Exception:
+            order_lookups.add(1, {"outcome": "error"})
+            raise
+        order_lookups.add(1, {"outcome": "found"})
+        logger.info(
+            "Order %s found", order_id,
+            extra={"order.id": order_id, "order.found": True, "order.status": order["status"]},
+        )
+        return order
 
 
 @app.post("/api/orders", status_code=201)

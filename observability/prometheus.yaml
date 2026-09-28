@@ -1,0 +1,20 @@
+# Metrics arrive from the OpenTelemetry Collector through the OTLP receiver
+# (enabled with --web.enable-otlp-receiver), so there are no scrape jobs for the app.
+global:
+  evaluation_interval: 15s
+
+otlp:
+  # service.name/service.namespace become `job` and service.instance.id becomes `instance`.
+  promote_resource_attributes:
+    - deployment.environment.name
+    - service.version
+
+storage:
+  tsdb:
+    # OTLP pushes can arrive slightly out of order after Collector retries.
+    out_of_order_time_window: 30m
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

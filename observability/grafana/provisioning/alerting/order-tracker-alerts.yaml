@@ -1,0 +1,69 @@
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: order-tracker
+    folder: Order Tracker
+    interval: 1m
+    rules:
+      - uid: order-tracker-5xx
+        title: Order Tracker 5xx responses
+        condition: C
+        data:
+          # 5xx responses per endpoint (method + route) in the last 5 minutes.
+          # increase() cannot see the first error of a new series (the counter's first sample
+          # is already 1, and every app restart starts new series), so a series that did not
+          # exist 5 minutes ago counts its whole value instead.
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: A
+              instant: true
+              range: false
+              expr: >-
+                round(sum by (http_request_method, http_route) (
+                  (
+                    http_server_request_duration_seconds_count{job="order-tracker", http_route!="/healthz", http_response_status_code=~"5.."}
+                    unless
+                    http_server_request_duration_seconds_count{job="order-tracker", http_route!="/healthz", http_response_status_code=~"5.."} offset 5m
+                  ) + 0
+                  or
+                  increase(http_server_request_duration_seconds_count{job="order-tracker", http_route!="/healthz", http_response_status_code=~"5.."}[5m])
+                ))
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [0]
+        # No 5xx series at all (e.g. a fresh stack) is a healthy state, not missing data.
+        noDataState: OK
+        execErrState: Error
+        for: 0s
+        # An endpoint whose series disappears (e.g. after an app restart) resolves on its own.
+        missing_series_evals_to_resolve: 2
+        annotations:
+          summary: >-
+            {{ printf "%.0f" $values.A.Value }} 5xx response(s) from {{ $labels.http_request_method }} {{ $labels.http_route }} in the last 5 minutes
+          description: >-
+            Endpoint {{ $labels.http_request_method }} {{ $labels.http_route }} returned
+            {{ printf "%.0f" $values.A.Value }} server error(s) (HTTP 5xx) in the last 5 minutes.
+            The alert resolves once the endpoint has had no 5xx responses for 5 minutes.
+            Check the dashboard, then the error logs and traces for that route.
+          endpoint: "{{ $labels.http_request_method }} {{ $labels.http_route }}"
+          time_window: 5m
+          dashboard_url: >-
+            {{ externalURL }}d/order-tracker/order-tracker?var-route={{ urlquery $labels.http_route }}&from=now-1h&to=now
+          # Links the rule to the dashboard's "Server errors (5xx)" panel in the Grafana UI and notifications.
+          __dashboardUid__: order-tracker
+          __panelId__: "2"
+        labels:
+          service: order-tracker
+          severity: critical

@@ -1,0 +1,23 @@
+apiVersion: 1
+
+# Deliver every alert to the incident-response service (incident-response/), which runs on
+# the host and saves the logs and traces behind the alert before starting a coding assistant.
+contactPoints:
+  - orgId: 1
+    name: incident-response
+    receivers:
+      - uid: incident-response-webhook
+        type: webhook
+        settings:
+          url: $INCIDENT_RESPONSE_URL
+          httpMethod: POST
+        disableResolveMessage: false
+
+policies:
+  - orgId: 1
+    receiver: incident-response
+    # One notification group, and so one incident, per failing endpoint.
+    group_by: [alertname, http_request_method, http_route]
+    group_wait: 10s
+    group_interval: 1m
+    repeat_interval: 4h
